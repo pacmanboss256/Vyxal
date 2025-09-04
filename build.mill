@@ -1,13 +1,13 @@
 import java.net.{URL, URLClassLoader}
 
-import mill._
+import mill.*
 import mill.api.Result
-import mill.scalajslib._
-import mill.scalajslib.api._
-import mill.scalalib._
+import mill.scalajslib.*
+import mill.scalajslib.api.*
+import mill.scalalib.*
 import mill.scalalib.scalafmt.ScalafmtModule
-import mill.scalanativelib._
-import mill.scalanativelib.api._
+import mill.scalanativelib.*
+import mill.scalanativelib.api.*
 
 /** Shared settings for all modules */
 trait VyxalModule extends ScalaModule with ScalafmtModule {
@@ -17,12 +17,12 @@ trait VyxalModule extends ScalaModule with ScalafmtModule {
 
   def platform: String
 
-  override def ivyDeps =
-    Agg(
-      ivy"org.typelevel::spire::0.18.0",
-      ivy"com.github.scopt::scopt::4.1.0",
-      ivy"com.outr::scribe::3.13.5",
-      ivy"org.scala-lang::toolkit:0.6.0",
+  override def mvnDeps =
+    Seq(
+      mvn"org.typelevel::spire::0.18.0",
+      mvn"com.github.scopt::scopt::4.1.0",
+      mvn"com.outr::scribe::3.13.5",
+      mvn"org.scala-lang::toolkit:0.6.0",
     )
 
   override def scalacOptions =
@@ -42,59 +42,60 @@ trait VyxalModule extends ScalaModule with ScalafmtModule {
 
   // Combine shared sources and platform-specific sources
   override def sources =
-    T.sources(
-      build.millSourcePath / platform / "src",
-      build.millSourcePath / "shared" / "src",
+    Task.Sources(
+      moduleDir / platform / "src",
+      moduleDir / "shared" / "src",
     )
   override def resources =
-    T.sources(
-      build.millSourcePath / platform / "resources",
-      build.millSourcePath / "shared" / "resources",
+    Task.Sources(
+      moduleDir / platform / "resources",
+      moduleDir / "shared" / "resources",
     )
 
   trait VyxalTestModule
       extends JavaTests
       with TestModule.ScalaTest
       with ScalafmtModule {
-    override def defaultCommandName() = "test"
+    override def defaultTask() = "test"
 
-    override def ivyDeps =
-      Agg(
-        ivy"org.scalatest::scalatest::3.2.19",
-        ivy"org.scala-sbt:test-interface:1.0",
-        ivy"org.virtuslab::scala-yaml::0.0.8",
+    override def mvnDeps =
+      Seq(
+        mvn"org.scalatest::scalatest::3.2.19",
+        mvn"org.scala-sbt:test-interface:1.0",
+        mvn"org.virtuslab::scala-yaml::0.0.8",
       )
 
     // Task to only show output from failed tests
     def testQuiet(args: String*) = {
       val newArgs = if (args.contains("--")) args else args :+ "--"
-      T.command { testOnly(newArgs :+ "-oNCXEORM": _*)() }
+      Task.Command { testOnly(newArgs :+ "-oNCXEORM"*)() }
     }
 
     override def sources =
-      T.sources(
-        build.millSourcePath / platform / "test" / "src",
-        build.millSourcePath / "shared" / "test" / "src",
+      Task.Sources(
+        moduleDir / platform / "test" / "src",
+        moduleDir / "shared" / "test" / "src",
       )
     override def resources =
-      T.sources(
-        build.millSourcePath / platform / "test" / "resources",
-        build.millSourcePath / "shared" / "test" / "resources",
+      Task.Sources(
+        moduleDir / platform / "test" / "resources",
+        moduleDir / "shared" / "test" / "resources",
       )
   }
 }
 
 trait JvmCommon extends VyxalModule {
+  
   val platform = "jvm"
 
-  def ivyDeps =
-    T {
-      super.ivyDeps() ++
+  def mvnDeps =
+    Task {
+      super.mvnDeps() ++
         Seq(
           // For the REPL
-          ivy"org.jline:jline:3.30.4",
-          ivy"org.jline:jline-terminal-jansi:3.30.4",
-          ivy"org.fusesource.jansi:jansi:2.4.2",
+          mvn"org.jline:jline:3.30.4",
+          mvn"org.jline:jline-terminal-jansi:3.30.4",
+          mvn"org.fusesource.jansi:jansi:2.4.2",
         )
     }
 
@@ -102,11 +103,11 @@ trait JvmCommon extends VyxalModule {
     Map("REPL" -> "false", "VYXAL_LOG_LEVEL" -> "Debug")
 
   override def assembly =
-    T {
+    Task {
       // Make sure to generate nanorcs first
       jvm.nanorc()
       // Rename jar to vyxal-<version>.jar
-      val out = T.dest / s"vyxal-$vyxalVersion.jar"
+      val out = Task.dest / s"vyxal-$vyxalVersion.jar"
       os.move(super.assembly().path, out)
       PathRef(out)
     }
@@ -114,51 +115,51 @@ trait JvmCommon extends VyxalModule {
 
 /** Shared and JVM-specific code */
 object jvm extends JvmCommon {
-  val platform = "jvm"
+  override val platform = "jvm"
 
   def mainClass: T[Option[String]] = Some("vyxal.Main")
 
   /** Generate elements.txt and trigraphs.txt */
   def docs =
-    T {
+    Task {
       jvm.runMain(
         "vyxal.gen.generateDocs",
-        (build.millSourcePath / "documentation" / "table.md").toString,
-        (build.millSourcePath / "contributing" / "vyxal.grammar").toString,
-        (build.millSourcePath / "contributing" / "vyxalLit.grammar").toString,
+        (moduleDir / "documentation" / "table.md").toString,
+        (moduleDir / "contributing" / "vyxal.grammar").toString,
+        (moduleDir / "contributing" / "vyxalLit.grammar").toString,
       )()
     }
 
   def sortYAML =
-    T {
+    Task {
       jvm.runMain(
         "vyxal.gen.sortYAML",
-        (build.millSourcePath / "shared" / "test" / "resources" /
+        (moduleDir / "shared" / "test" / "resources" /
           "tests.yaml").toString,
       )()
     }
 
   /** Generate nanorc files for JLine highlighting */
   def nanorc =
-    T {
+    Task {
       jvm.runMain(
         "vyxal.gen.GenerateNanorc",
-        (build.millSourcePath / "jvm" / "resources").toString,
+        (moduleDir / "jvm" / "resources").toString,
       )()
     }
 
   /** Generate parsed_yaml.js and theseus.json */
   def theseus =
-    T {
+    Task {
       jvm.runMain(
         "vyxal.gen.generateTheseus",
-        (build.millSourcePath / "pages" / "theseus.json").toString,
+        (moduleDir / "pages" / "theseus.json").toString,
       )()
     }
 
   def fuzz(min: Int, max: Int, timeout: Int) =
-    T.command {
-      jvm.runMain("vyxal.fuzz", min.toString, max.toString, timeout.toString)
+    Task.Command {
+      jvm.runMain("vyxal.fuzz", min.toString, max.toString, timeout.toString)()
     }
 
   object test extends ScalaTests with VyxalTestModule
@@ -172,20 +173,20 @@ object jvmLiterate extends JvmCommon {
 
 /** Shared and JS-specific code */
 object js extends VyxalModule with ScalaJSModule {
-  val platform = "js"
+  override val platform = "js"
 
   def scalaJSVersion = "1.16.0"
-  def moduleKind = T { ModuleKind.ESModule }
+  def moduleKind = Task { ModuleKind.ESModule }
 
-  def ivyDeps =
-    T {
-      super.ivyDeps() ++ Seq(ivy"org.scala-js::scalajs-dom::2.8.0")
+  def mvnDeps =
+    Task {
+      super.mvnDeps() ++ Seq(mvn"org.scala-js::scalajs-dom::2.8.0")
     }
 
-  def pagesDir = build.millSourcePath / "pages"
+  def pagesDir = moduleDir / "pages"
 
   override def fastLinkJS =
-    T {
+    Task {
       val res = super.fastLinkJS()
       os.copy.over(res.dest.path / "vyxal.js", pagesDir / "vyxal.js")
       os.copy.over(res.dest.path / "vyxal.js.map", pagesDir / "vyxal.js.map")
@@ -209,7 +210,7 @@ object js extends VyxalModule with ScalaJSModule {
     }
 
   override def fullLinkJS =
-    T {
+    Task {
       val res = super.fastLinkJS()
       os.copy.over(res.dest.path / "vyxal.js", pagesDir / "vyxal.js")
       os.copy.over(res.dest.path / "vyxal.js.map", pagesDir / "vyxal.js.map")
@@ -230,14 +231,15 @@ object js extends VyxalModule with ScalaJSModule {
     }
 
   def copyDicts =
-    T.sources {
-      val resources = build.millSourcePath / "shared" / "resources"
+      val resources = moduleDir / "shared" / "resources"
       val short = "ShortDictionary.txt"
       val long = "LongDictionary.txt"
       os.copy(resources / short, pagesDir / short)
       os.copy(resources / long, pagesDir / long)
-      Seq(PathRef(pagesDir / short), PathRef(pagesDir / long))
-    }
+      Task.Sources(
+          pagesDir / short,
+          pagesDir / long
+      )
 
   object test extends ScalaJSTests with VyxalTestModule
 }
