@@ -11,8 +11,11 @@ import vyxal.Context.{peek, pop, push}
 import vyxal.ListHelpers.makeIterable
 import vyxal.MiscHelpers.defaultEmpty
 
+import java.time.{Duration as JDuration, ZoneId, ZonedDateTime}
 import scala.collection.mutable.ArrayBuffer
 import scala.io.StdIn
+
+import spire.math.Polynomial
 
 given (using Context): Ordering[VAny] with
   override def compare(x: VAny, y: VAny): Int = MiscHelpers.compare(x, y)
@@ -64,6 +67,12 @@ object Elements:
       case (VStr(a), b: VNum) => StringHelpers.intoNPieces(a, b)
       case (a: VNum, VStr(b)) => StringHelpers.intoNPieces(b, a)
       case (VStr(a), VStr(b)) => VList(a.split(b).toSeq.vs)
+      case (a: VDuration, b: VNum) =>
+        if b.toLong == 0 then VDuration.Zero
+        else VDuration(JDuration.ofMillis(a.dur.toMillis / b.toLong))
+      case (a: VDuration, b: VDuration) =>
+        if b.dur.toMillis == 0 then VNum(0)
+        else VNum(a.dur.toMillis.toDouble / b.dur.toMillis.toDouble)
     },
     "×" -> fullToImpl(Dyad, MiscHelpers.multiply),
     addPart("∧", Dyad, true) {
@@ -84,6 +93,19 @@ object Elements:
     addPart("ʀ", Monad, true) {
       case a: VNum => NumberHelpers.range(0, a - a.signum)
       case VStr(a) => a.toLowerCase()
+      case d: VDate => NumberHelpers
+          .range(1, 12)
+          .asInstanceOf[Seq[VNum]]
+          .map((m: VNum) =>
+            VDate.of(
+              d.year.toInt,
+              m.toInt,
+              d.day.toInt,
+              d.hour.toInt,
+              d.minute.toInt,
+              d.second.toInt,
+            )
+          )
     },
     addPart("ʁ", Monad, true) {
       case a: VNum =>
@@ -101,10 +123,14 @@ object Elements:
       case VStr(a) =>
         val temp = a.length % 8
         if temp == 0 then a else ("0" * (8 - temp)) + a
+      case a: VDate => VDate(a.dt.minusDays(1))
+      case a: VDuration => VDuration(a.dur.minus(JDuration.ofDays(1)))
     },
     addPart("›", Monad, true) {
       case a: VNum => a + 1
       case VStr(a) => a.replace(" ", "0")
+      case a: VDate => VDate(a.dt.plusDays(1))
+      case a: VDuration => VDuration(a.dur.plus(JDuration.ofDays(1)))
     },
     addPart("!", Monad, true) {
       case a @ VNum(r, i) =>
@@ -166,9 +192,21 @@ object Elements:
       },
     addPart("<", Dyad, true) {
       case (a: VVal, b: VVal) => a < b
+      case (b: VNum, a: VFun) =>
+        var res = b
+        while !a(res).toBool do res -= 1
+        res
       case (a: VFun, b: VNum) =>
         var res = b
         while !a(res).toBool do res -= 1
+        res
+      case (b: VDate, a: VFun) =>
+        var res = b
+        while !a(res).toBool do res = VDate(res.dt.minusDays(1))
+        res
+      case (a: VFun, b: VDate) =>
+        var res = b
+        while !a(res).toBool do res = VDate(res.dt.minusDays(1))
         res
     },
     addPart("=", Dyad, true) {
@@ -176,12 +214,26 @@ object Elements:
       case (a: VNum, VStr(b)) => a.toString == b
       case (VStr(a), b: VNum) => a == b.toString
       case (VStr(a), VStr(b)) => a == b
+      case (a: VDate, b: VDate) => a === b
+      case (a: VDuration, b: VDuration) => a === b
     },
     addPart(">", Dyad, true) {
       case (a: VVal, b: VVal) => a > b
       case (a: VFun, b: VNum) =>
         var res = b
         while a(res).toBool do res += 1
+        res
+      case (b: VNum, a: VFun) =>
+        var res = b
+        while a(res).toBool do res += 1
+        res
+      case (a: VFun, b: VDate) =>
+        var res = b
+        while a(res).toBool do res = VDate(res.dt.plusDays(1))
+        res
+      case (b: VDate, a: VFun) =>
+        var res = b
+        while a(res).toBool do res = VDate(res.dt.plusDays(1))
         res
     },
     "?" ->
@@ -197,6 +249,12 @@ object Elements:
     addPart("@", Dyad, true) {
       case (a: VNum, b: VNum) => (a - b).vabs
       case (VStr(a), VStr(b)) => StringHelpers.levenshtein(a, b)
+      case (a: VDate, b: VDate) =>
+        val dur = JDuration.between(b.dt, a.dt)
+        VDuration(if dur.isNegative then dur.negated else dur)
+      case (a: VDuration, b: VDuration) =>
+        val dur = a.dur.minus(b.dur)
+        VDuration(if dur.isNegative then dur.negated else dur)
       case (a: VPhysical, b: VFun) =>
         FuncHelpers.reduceOverPairs(b, makeIterable(a))
       case (a: VFun, b: VPhysical) =>
@@ -213,6 +271,7 @@ object Elements:
       case VStr(a) => VList(
           a.map(x => NumberHelpers.toBinary(StringHelpers.chrord(x.toString)))
         )
+      case d: VDate => d.dayOfWeek
     },
     addPart("C", Dyad, false) {
       case (a: VList, b: VVal) => a.count(_ === b)
@@ -228,6 +287,16 @@ object Elements:
     addPart("E", Monad, true) {
       case a: VNum => VNum(2) ** a
       case VStr(a) => MiscHelpers.eval(a)
+      case a: VDate => VList(
+          Seq(
+            a.year,
+            a.month,
+            a.day,
+            a.hour,
+            a.minute,
+            a.second,
+          )
+        )
     },
     addPart("F", Dyad, false) {
       case (a: VFun, b) => ListHelpers.filter(b.ritr, a)
@@ -272,7 +341,9 @@ object Elements:
     "L" ->
       direct(Monad) {
         val a = pop()
-        push(a.itr.length)
+        a match
+          case d: VDuration => push(d.toSeconds)
+          case _ => push(a.itr.length)
       },
     addPart("M", Dyad, true) {
       case (a: VFun, b) => ListHelpers.map(a, b.ritr)
@@ -290,6 +361,7 @@ object Elements:
       case a: VNum => -a
       case VStr(a) => StringHelpers.swapCase(a)
       case a: VFun => MiscHelpers.firstNonNegative(a)
+      case a: VDuration => VDuration(a.dur.negated)
     },
     addPart("O", Monad, false) {
       case a: VNum => StringHelpers.chrord(a)
@@ -342,6 +414,13 @@ object Elements:
     },
     addPart("R", Dyad, true) {
       case (a: VNum, b: VNum) => NumberHelpers.range(a, b).dropRight(1)
+      case (a: VDate, b: VDate) =>
+        val step = if a < b then 1L else -1L
+        VList(LazyList.unfold(a) { current =>
+          if (step > 0 && current < b) || (step < 0 && current > b) then
+            Some((current, VDate(current.dt.plusDays(step))))
+          else None
+        })
       case (VStr(a), VStr(b)) => StringHelpers.r(b).findFirstIn(a).isDefined
       case (VStr(a), b: VNum) => StringHelpers.r(b).findFirstIn(a).isDefined
       case (a: VNum, VStr(b)) =>
@@ -358,6 +437,7 @@ object Elements:
     addPart("T", Monad, false) {
       case a: VNum => a * 3
       case VStr(a) => a.forall(_.isLetter)
+      case a: VDate => VList(Seq(a.year, a.month, a.day))
       case a: VList => ListHelpers.transpose(a)
     },
     "U" ->
@@ -423,13 +503,15 @@ object Elements:
       ), // null objects pop args and return nothing
     "#`" -> niladify(ctx ?=> ctx.getStack.bigLength),
     addPart("a", Monad, false) {
-      case a: VNum => a.itr.exists(_ == VNum(0))
+      case a: VNum => a.itr.exists(_ != VNum(0))
       case VStr(a) if a.length == 1 => a.head.isUpper
       case VStr(a) => VList(a.map(c => VNum(c.isUpper)))
       case a: VList => a.itr.exists(_.toBool)
     },
     "b" -> fullToImpl(Monad, NumberHelpers.fromBinary),
     addPart("c", Dyad, false) {
+      case (a: VDate, b: VNum) => a.plusMonths(b.toLong)
+      case (a: VNum, b: VDate) => b.plusMonths(a.toLong)
       case (a: VVal, b: VVal) => a.toString().contains(b.toString())
       case (a: VList, b: VVal) => a.contains(b)
       case (a: VVal, b: VList) => b.contains(a)
@@ -448,10 +530,14 @@ object Elements:
     addPart("d", Monad, true) {
       case a: VNum => a + a
       case VStr(a) => s"$a$a"
+      case a: VDuration => VDuration(a.dur.plus(a.dur))
     },
     addPart("e", Monad, true) {
       case a: VNum => a % 2 == VNum(0)
       case VStr(a) => a.split("\n").toIndexedSeq
+      case a: VDate =>
+        val y = a.dt.getYear
+        VNum(y % 4 == 0 && (y % 100 != 0 || y % 400 == 0))
     },
     "f" -> fullToImpl(Monad, x => ListHelpers.flatten(x.itr)),
     "g" -> fullToImpl(Monad, a => a.itr.minOption.getOrElse(Seq.empty)),
@@ -735,9 +821,20 @@ object Elements:
     addPart("⌈", Monad, true) {
       case a: VNum => a.ceil
       case VStr(a) => a.split(" ").toIndexedSeq
+      case a: VDate => VList(
+          Seq(
+            a.year,
+            a.month,
+            a.day,
+            a.hour,
+            a.minute,
+            a.second,
+          )
+        )
     },
     addPart("⌊", Monad, true) {
       case a: VNum => a.floor
+      case a: VDate => a.toUnixTime
       case VStr(a) =>
         if a.isEmpty then 0
         else
@@ -819,6 +916,9 @@ object Elements:
     },
     addPart("Þ⊖", Monad, false) {
       case n: VNum => RegisterHelpers.pop(n)
+      case VListOf[VNum](lst) => VList(
+          Polynomial.dense(lst.map(_.real).toArray).roots.map(VNum(_)).toSeq
+        )
     },
     addPart("Þ⌽", Monad, false) {
       case n: VNum => RegisterHelpers.pop(n, peek = true)
@@ -843,6 +943,7 @@ object Elements:
             val times = a
             val iterable = pop()
             push(ListHelpers.rotate(iterable, times))
+          case a: VDate => push(a.plusYears(1))
           case _ => throw UnsupportedOverloadException("↺", "function | object")
       },
     "↻" ->
@@ -857,7 +958,7 @@ object Elements:
             val times = a
             val iterable = pop()
             push(ListHelpers.rotate(iterable, -times))
-
+          case a: VDate => push(a.plusYears(-1))
           case _ => throw UnsupportedOverloadException("↻", "function | object")
       },
     addPart("≜", Triad, false) {
@@ -918,6 +1019,10 @@ object Elements:
       case (a: VFun, VStr(b), VStr(c)) => StringHelpers.regexSub(b, c, a)
     },
     addPart("⎀", Triad, false) {
+      case (a: VDate, b: VDate, c: VDate) =>
+        val lo = if b <= c then b else c
+        val hi = if b <= c then c else b
+        VNum(a >= lo && a <= hi)
       case (a, b: VNum, c) =>
         ListHelpers.insert(ListHelpers.makeIterable(a), b, c)
       case (a, b: VList, c: VList) =>
@@ -942,6 +1047,7 @@ object Elements:
           ),
       ),
     addPart("⊢", Dyad, false) {
+      case (date: VDate, VStr(tz)) => date.withZone(tz)
       case (number: VNum, base: VNum) => NumberHelpers.toBase(number, base)
       case (number: VNum, baseAlphabet: VIter) =>
         NumberHelpers.toBase(number, baseAlphabet)
@@ -1141,6 +1247,20 @@ object Elements:
         else throw InvalidListOverloadException("Ϣ", b, "Number")
       case (a: VFun, b: VNum) => MiscHelpers.predicateSlice(a, b, 0)
       case (a: VNum, b: VFun) => MiscHelpers.predicateSlice(b, a, 0)
+      case (a: VFun, b: VList) =>
+        // All permutations where the function is true.
+        ListHelpers
+          .permutations(b)
+          .filter { perm =>
+            a(perm).toBool
+          }
+          .toSeq
+      case (a: VList, b: VFun) => ListHelpers
+          .permutations(a)
+          .filter { perm =>
+            b(perm).toBool
+          }
+          .toSeq
     },
     addPart("≤", Dyad, true) {
       case (a, b: VFun) => a.itr.minByOption(x => b(x)) match
@@ -1207,16 +1327,13 @@ object Elements:
         if s.length() == 1 then StringHelpers.caseOf(s)
         else s.map(c => StringHelpers.caseOf(c.toString))
     },
-    "†" ->
-      fullToImpl(
-        Monad,
-        x =>
-          VList(
-            ListHelpers
-              .groupConsecutive(x.itr)
-              .map(group => VNum(group.itr.bigLength))
-          ),
-      ),
+    addPart("†", Monad, false) {
+      case x: VPhysical => VList(
+          ListHelpers
+            .groupConsecutive(x.itr)
+            .map(group => VNum(group.itr.bigLength))
+        )
+    },
     "⎙" ->
       direct(Monad) {
         MiscHelpers.vyPrintln(peek())
@@ -1265,11 +1382,14 @@ object Elements:
         else if b.toInt <= 9 then a - (a % (10 ** -(b.toInt)))
         else if a == VNum(0) then a
         else
-          NumberHelpers
-            .round((a * (10 ** b.toInt)))
-            .toString()
-            .patch(
-              NumberHelpers.round(NumberHelpers.log(a, 10) + 0.5).toInt,
+          val intLogA =
+            NumberHelpers.round(NumberHelpers.log(a.vabs, 10) + 0.5).toInt
+          val sign = if a < 0 then "-" else ""
+          val leadingZeroes = "0" * (if a < 1 then -intLogA + 1 else 0)
+          (sign + leadingZeroes +
+            NumberHelpers.round((a.vabs * (10 ** b.toInt))).toString())
+            .patch( // insert the decimal dot
+              (if intLogA > 0 then intLogA else 1) + (a < 0).toInt,
               ".",
               0,
             ) // fallback to return the string representation if the precision is too high
@@ -1294,6 +1414,7 @@ object Elements:
     addPart("⍢", Monad, true) {
       case a: VNum => a % 2
       case VStr(a) => a.slice(a.length / 2, a.length)
+      case d: VDate => d.numDayOfWeek
     },
     addPart("ℂ", Dyad, true) {
       case (a: VNum, b: VNum) => NumberHelpers.nChooseK(a, b)
@@ -1321,6 +1442,13 @@ object Elements:
       case (predicate: VFun, lst: VAny) =>
         ListHelpers.sortBy(lst.ritr, predicate)
       case (start: VNum, end: VNum) => NumberHelpers.range(start, end)
+      case (start: VDate, end: VDate) =>
+        val step = if start <= end then 1L else -1L
+        VList(LazyList.unfold(start) { current =>
+          if (step > 0 && current <= end) || (step < 0 && current >= end) then
+            Some((current, VDate(current.dt.plusDays(step))))
+          else None
+        })
       case (VStr(haystack), VStr(pattern)) =>
         StringHelpers.splitKeepDelimiters(haystack, pattern)
     },
@@ -1400,6 +1528,8 @@ object Elements:
     addPart("⍰", Monad, true) {
       case a: VNum => a != VNum(0)
       case VStr(a) => a.nonEmpty
+      case d: VDate => d.toBool
+      case dur: VDuration => dur.toBool
     },
     addPart("◌", Monad, true) {
       case a: VNum => NumberHelpers.round(a)
@@ -1463,6 +1593,16 @@ object Elements:
             case value => value == needle
           }
         contains(needle, haystack)
+      case (fn: VFun, iter: VList) =>
+        // Get the first permutation of iter that satisfies fn, if it exists
+        ListHelpers
+          .permutations(iter)
+          .find(permutation => fn(permutation).toBool)
+          .getOrElse(Seq.empty)
+      case (iter: VList, fn: VFun) => ListHelpers
+          .permutations(iter)
+          .find(permutation => fn(permutation).toBool)
+          .getOrElse(Seq.empty)
 
     },
     "⍨" -> direct(Monad) { pop().itr.foreach(push(_)) },
@@ -1605,6 +1745,8 @@ object Elements:
       ),
     "Ṭ" -> fullToImpl(Monad, x => ListHelpers.truthyIndices(x.itr)),
     addPart("Ṫ", Monad, false) {
+      case VStr(s) => VDate.parse(s)
+      case a: VNum => VDate.fromEpochSecond(a.toLong)
       case VList(indices) =>
         if !indices.forall(_.isInstanceOf[VNum]) then
           throw InvalidListOverloadException("Ṫ", indices, "Number")
@@ -1789,6 +1931,44 @@ object Elements:
     addPart("#ᴥ", Monad, false) {
       case VStr(top) => MiscHelpers.validCode(top)
     },
+    "#n" -> niladify { VDate.now() },
+    "#d" -> niladify {
+      val now = ZonedDateTime.now()
+      VDate(now.toLocalDate.atStartOfDay(now.getZone))
+    },
+    "#m" -> niladify {
+      val now = ZonedDateTime.now()
+      VDate(now.withDayOfMonth(1).toLocalDate.atStartOfDay(now.getZone))
+    },
+    "#y" -> niladify {
+      val now = ZonedDateTime.now()
+      VDate(
+        now.withDayOfYear(1).toLocalDate.atStartOfDay(now.getZone)
+      )
+    },
+    "#z" -> niladify {
+      import scala.jdk.CollectionConverters.*
+      VList(
+        ZoneId.getAvailableZoneIds.asScala.toSeq.sorted.map(VStr(_))
+      )
+    },
+    addPart("#t", Monad, false) {
+      case VStr(s) => VDate.parse(s)
+      case a: VNum => VDate.fromEpochSecond(a.toLong)
+      case a: VList if a.lst.forall(_.isInstanceOf[VNum]) =>
+        VDate.fromComponents(a.lst)
+      case a: VList =>
+        // If the list contains strings, join with spaces and parse
+        VDate.parse(a.lst.map(StringHelpers.vyToString(_)).mkString(" "))
+    },
+    "#Z" ->
+      direct(Monad) {
+        VDate.setDefaultZone(pop().asInstanceOf[VStr].s)
+      },
+    addPart("#U", Monad, false) {
+      case VStr(s) => VDuration.parse(s)
+      case a: VNum => VDuration.ofDaysDecimal(a.toDouble)
+    },
     addPart("∆<", Monad, true) {
       case a: VNum => a.arg
     },
@@ -1892,12 +2072,16 @@ object Elements:
     addPart("∆½", Monad, true) {
       case a: VNum =>
         val asRational = a.real.toRational
-        VList(
-          Seq(
-            VNum(asRational.numerator.toInt),
-            VNum(asRational.denominator.toInt),
+        if asRational.denominator.toLong != 0
+        then // TODO: make a better rationality test. i'm not good enough at whatever branch of maths this is to figure it out.
+          VList(
+            Seq(
+              VNum(asRational.numerator.toLong),
+              VNum(asRational.denominator.toLong),
+            )
           )
-        )
+        else throw UserYikesException("Tried to convert irrational to rational")
+
     },
     addPart("ÞR", Dyad, false) {
       case (a, VListOf[VNum](b)) =>
@@ -2080,6 +2264,17 @@ object Elements:
             push(groups.map(_.itr.headOption.getOrElse(VStr(""))), lengths)
           case _ => throw UnsupportedOverloadException("øE", "List | Function")
       },
+    addPart("øJ", Dyad, false) {
+      case (VStr(a), VStr(b)) => VStr(
+          StringHelpers
+            .split(a, "\n")
+            .map(_.toString())
+            .zip(StringHelpers.split(b, "\n").map(_.toString()))
+            .map((a, b) => s"$a$b")
+            .mkString("\n")
+        )
+
+    },
     addPart("Þ0", Dyad, false) {
       case (a: VList, b: VNum) => ListHelpers.zeroPad(a, b)
       case (VStr(a), b: VNum) => StringHelpers.zeroPad(a, b)

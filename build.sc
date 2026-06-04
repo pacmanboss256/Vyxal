@@ -13,7 +13,7 @@ import mill.scalanativelib.api._
 trait VyxalModule extends ScalaModule with ScalafmtModule {
   override def scalaVersion = "3.3.1"
 
-  def vyxalVersion = "3.11.0"
+  def vyxalVersion = "3.12.0"
 
   def platform: String
 
@@ -23,6 +23,7 @@ trait VyxalModule extends ScalaModule with ScalafmtModule {
       ivy"com.github.scopt::scopt::4.1.0",
       ivy"com.outr::scribe::3.13.5",
       ivy"org.scala-lang::toolkit:0.6.0",
+      ivy"io.github.cquiroz::scala-java-time::2.6.0",
     )
 
   override def scalacOptions =
@@ -179,7 +180,10 @@ object js extends VyxalModule with ScalaJSModule {
 
   def ivyDeps =
     T {
-      super.ivyDeps() ++ Seq(ivy"org.scala-js::scalajs-dom::2.8.0")
+      super.ivyDeps() ++ Seq(
+        ivy"org.scala-js::scalajs-dom::2.8.0",
+        ivy"io.github.cquiroz::scala-java-time-tzdb::2.6.0",
+      )
     }
 
   def pagesDir = build.millSourcePath / "pages"

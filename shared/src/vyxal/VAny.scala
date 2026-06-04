@@ -7,6 +7,20 @@ import vyxal.elements.ElementInformation
 import vyxal.elements.Elements
 import vyxal.Interpreter.executeFn
 
+import java.time.{
+  Duration as JDuration,
+  Instant,
+  LocalDate,
+  LocalDateTime,
+  LocalTime,
+  Period,
+  ZoneId,
+  ZoneOffset,
+  ZonedDateTime,
+}
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeFormatterBuilder
+import java.time.temporal.ChronoField
 import scala.annotation.targetName
 import scala.collection.immutable.NumericRange
 import scala.collection.immutable.NumericRange.Inclusive
@@ -14,6 +28,7 @@ import scala.collection.mutable as mut
 import scala.math.Ordered
 import scala.reflect.TypeTest
 import scala.util.matching.Regex
+import scala.util.Try
 
 import spire.math.{Complex, Real}
 
@@ -26,6 +41,8 @@ import spire.math.{Complex, Real}
   *   - [[VFun]]
   *   - [[VConstructor]]
   *   - [[VObject]]
+  *   - [[VDate]]
+  *   - [[VDuration]]
   *
   * We derive [[CanEqual]] so that if you compare a `VAny`s to another type, the
   * compiler will complain
@@ -43,6 +60,8 @@ sealed trait VAny derives CanEqual:
       case (_, _: VFun) =>
         scribe.warn(s"Tried comparing $this to function $that")
         false
+      case (a: VDate, b: VDate) => a.dt.toInstant == b.dt.toInstant
+      case (a: VDuration, b: VDuration) => a.dur == b.dur
       case (a: VVal, b: VVal) => MiscHelpers.compare(a, b) == 0
       case _ => false
 
@@ -63,15 +82,18 @@ sealed trait VAny derives CanEqual:
       case l: VList => l.nonEmpty
       case c: VConstructor => true
       case o: VObject => true
+      case d: VDate => true
+      case d: VDuration => d.dur != JDuration.ZERO
 end VAny
 
 object VAny:
   given (using Context): Ordering[VAny] with
     override def compare(x: VAny, y: VAny): Int = MiscHelpers.compare(x, y)
 
-type VVal = VNum | VStr
+type VVal = VNum | VStr | VDate | VDuration
 type VPhysical = VNum | VStr | VList
 type VIter = VList | VStr
+type VTemporal = VDate | VDuration
 
 object conversions:
   given Conversion[String, VAny] = VStr(_)
@@ -108,6 +130,8 @@ object conversions:
   given Conversion[Real, VNum] = n => VNum.complex(n, 0)
   given Conversion[Complex[Real], VNum] = new VNum(_)
   given Conversion[Boolean, VNum] = b => if b then 1 else 0
+  given Conversion[ZonedDateTime, VDate] = VDate(_)
+  given Conversion[JDuration, VDuration] = VDuration(_)
 end conversions
 
 final case class VStr(s: String) extends VAny:
@@ -220,14 +244,251 @@ case class VObject(
     }
     s"$className { ${fs.mkString(", ")} }"
 
-  /** A Vyxal list. It simply wraps around another list and could represent a
-    * completely evaluated list, a finite lazy list that is in the process of
-    * being evaluated, or an infinite list.
-    *
-    * To construct a VList, use VList.apply or VList
-    * @param lst
-    *   The wrapped list actually holdings this VList's elements.
+/** A Vyxal date/time value wrapping a [[java.time.ZonedDateTime]].
+  *
+  * Every VDate carries a timezone. The default is the system local zone.
+  * Comparison is based on the underlying [[java.time.Instant]] so that two
+  * VDates representing the same point in time are equal regardless of zone.
+  */
+final case class VDate(dt: ZonedDateTime) extends VAny, Ordered[VDate]:
+  def year: VNum = VNum(dt.getYear)
+  def month: VNum = VNum(dt.getMonthValue)
+  def day: VNum = VNum(dt.getDayOfMonth)
+  def hour: VNum = VNum(dt.getHour)
+  def minute: VNum = VNum(dt.getMinute)
+  def second: VNum = VNum(dt.getSecond)
+  def zone: VStr = VStr(dt.getZone.getId)
+  def dayOfWeek: VStr = VStr(dt.getDayOfWeek.toString)
+  def numDayOfWeek: VNum = VNum(dt.getDayOfWeek.getValue)
+
+  /** Calendar-aware: add whole months. */
+  def plusMonths(n: Long): VDate = VDate(dt.plusMonths(n))
+
+  /** Calendar-aware: add whole years. */
+  def plusYears(n: Long): VDate = VDate(dt.plusYears(n))
+
+  /** Calendar-aware: add whole weeks. */
+  def plusWeeks(n: Long): VDate = VDate(dt.plusWeeks(n))
+
+  /** Convert to a different timezone, preserving the same instant. */
+  def withZone(zoneId: String): VDate =
+    VDate(dt.withZoneSameInstant(ZoneId.of(zoneId)))
+
+  /** Change the timezone label without adjusting the local time. */
+  def withZoneSameLocal(zoneId: String): VDate =
+    VDate(dt.withZoneSameLocal(ZoneId.of(zoneId)))
+
+  /** Unix epoch second for this date/time. */
+  def toUnixTime: VNum = VNum(dt.toEpochSecond)
+
+  /** Compare by instant (absolute point in time). */
+  override def compare(that: VDate): Int =
+    dt.toInstant.compareTo(that.dt.toInstant)
+  override def toString: String = dt.toString
+end VDate
+
+object VDate:
+  /** The zone used when none is specified. Mutable so programs can override. */
+  private var _defaultZone: Option[ZoneId] = None
+  private def defaultZone: ZoneId =
+    _defaultZone.getOrElse(ZoneId.systemDefault())
+
+  /** Update the default timezone used for all future VDate operations. */
+  def setDefaultZone(zoneId: String): Unit =
+    _defaultZone = Some(ZoneId.of(zoneId))
+
+  def now(): VDate = VDate(ZonedDateTime.now(defaultZone))
+
+  def of(
+      year: Int,
+      month: Int,
+      day: Int,
+      hour: Int = 0,
+      minute: Int = 0,
+      second: Int = 0,
+  ): VDate =
+    VDate(
+      ZonedDateTime.of(year, month, day, hour, minute, second, 0, defaultZone)
+    )
+
+  /** Formatter for 12-hour time like "4:45 PM" or "4:45:30 PM". */
+  private val TIME_12H: DateTimeFormatter = new DateTimeFormatterBuilder()
+    .appendValue(ChronoField.CLOCK_HOUR_OF_AMPM)
+    .appendLiteral(':')
+    .appendValue(ChronoField.MINUTE_OF_HOUR, 2)
+    .optionalStart()
+    .appendLiteral(':')
+    .appendValue(ChronoField.SECOND_OF_MINUTE, 2)
+    .optionalEnd()
+    .appendLiteral(' ')
+    .appendText(ChronoField.AMPM_OF_DAY)
+    .toFormatter(java.util.Locale.ENGLISH)
+
+  /** Try to parse a timezone identifier from a string, handling common
+    * abbreviations.
     */
+  private def parseZone(tz: String): ZoneId =
+    val trimmed = tz.trim
+    Try(ZoneId.of(trimmed)).getOrElse {
+      val fullId = java.util.TimeZone.getAvailableIDs.nn
+        .collect { case id if id != null => id }
+        .map(id => java.util.TimeZone.getTimeZone(id).nn)
+        .collectFirst {
+          case tz
+              if tz.getDisplayName(false, java.util.TimeZone.SHORT) ==
+                trimmed => tz.getID.nn
+        }
+      ZoneId.of(fullId.getOrElse(trimmed))
+    }
+
+  /** Parse a date/time string. Accepts any format the underlying library can
+    * handle — ISO-8601 with or without timezone, RFC-1123, date-only, time-only
+    * (defaulting to today), time with timezone, etc. If the parsed result has
+    * no zone information the default zone is assumed.
+    */
+  def parse(s: String): VDate =
+    // Chain of attempts — first success wins
+    val attempts: LazyList[Try[ZonedDateTime]] = LazyList(
+      // Try ZonedDateTime directly (uses ISO_ZONED_DATE_TIME internally)
+      Try(ZonedDateTime.parse(s)),
+      // RFC-1123 (e.g. "Tue, 3 Jun 2008 11:05:30 GMT")
+      Try(ZonedDateTime.parse(s, DateTimeFormatter.RFC_1123_DATE_TIME)),
+      // Offset date-time without zone id (e.g. "2024-03-15T10:30+05:00")
+      Try(ZonedDateTime.parse(s, DateTimeFormatter.ISO_OFFSET_DATE_TIME)),
+      // LocalDateTime (no zone) — attach default zone
+      Try(LocalDateTime.parse(s).atZone(defaultZone)),
+      // Date-only — midnight in default zone
+      Try(LocalDate.parse(s).atStartOfDay(defaultZone)),
+      // Instant — convert to default zone
+      Try(Instant.parse(s).atZone(defaultZone)),
+      // Time-only (ISO: "16:45" or "16:45:30") — today in default zone
+      Try(
+        LocalTime
+          .parse(s)
+          .atDate(LocalDate.now(defaultZone))
+          .atZone(defaultZone)
+      ),
+      // 12-hour time ("4:45 PM") — today in default zone
+      Try(
+        LocalTime
+          .parse(s.trim, TIME_12H)
+          .atDate(LocalDate.now(defaultZone))
+          .atZone(defaultZone)
+      ),
+      // "HH:mm ZONE" or "HH:mm:ss ZONE" — time + timezone
+      Try {
+        val lastSpace = s.lastIndexOf(' ')
+        if lastSpace < 0 then throw new Exception("not a time+timezone string")
+        val timePart = s.substring(0, lastSpace).trim
+        val zonePart = s.substring(lastSpace + 1).trim
+        val zone = parseZone(zonePart)
+        val time = Try(LocalTime.parse(timePart))
+          .getOrElse(LocalTime.parse(timePart.trim, TIME_12H))
+        time.atDate(LocalDate.now(zone)).atZone(zone)
+      },
+      // Common date formats: "MM/dd/yyyy", "dd-MM-yyyy", "dd.MM.yyyy"
+      Try(
+        LocalDate
+          .parse(s, DateTimeFormatter.ofPattern("M/d/yyyy"))
+          .atStartOfDay(defaultZone)
+      ),
+      Try(
+        LocalDate
+          .parse(s, DateTimeFormatter.ofPattern("d-M-yyyy"))
+          .atStartOfDay(defaultZone)
+      ),
+      Try(
+        LocalDate
+          .parse(s, DateTimeFormatter.ofPattern("d.M.yyyy"))
+          .atStartOfDay(defaultZone)
+      ),
+      // Date + time with common separators: "MM/dd/yyyy HH:mm:ss"
+      Try(
+        LocalDateTime
+          .parse(s, DateTimeFormatter.ofPattern("M/d/yyyy H:mm[:ss]"))
+          .atZone(defaultZone)
+      ),
+      // Just the year
+      Try(
+        LocalDate
+          .parse(s + "-01-01", DateTimeFormatter.ofPattern("yyyy-M-d"))
+          .atStartOfDay(defaultZone)
+      ),
+    )
+
+    attempts
+      .collectFirst { case scala.util.Success(zdt) => VDate(zdt) }
+      // Last resort: let java.time throw a descriptive exception
+      .getOrElse(VDate(ZonedDateTime.parse(s)))
+  end parse
+
+  /** Creates a [[VDate]] from a Unix epoch second in the system default zone. */
+  def fromEpochSecond(epoch: Long): VDate =
+    VDate(
+      ZonedDateTime.ofInstant(Instant.ofEpochSecond(epoch), defaultZone)
+    )
+
+  /** Creates a [[VDate]] from a Unix epoch second in a specific zone. */
+  def fromEpochSecond(epoch: Long, zone: ZoneId): VDate =
+    VDate(ZonedDateTime.ofInstant(Instant.ofEpochSecond(epoch), zone))
+
+  /** Creates a [[VDate]] from a list of numeric components starting from year.
+    *
+    * Components are filled in order: year, month, day, hour, minute, second.
+    * Missing components default to 1 for month/day and 0 for
+    * hour/minute/second. An empty list returns midnight Jan 1, year 0.
+    */
+  def fromComponents(components: Seq[VAny]): VDate =
+    val nums = components.map {
+      case n: VNum => n.toInt
+      case other => throw new IllegalArgumentException(
+          s"Expected VNum in date component list, got ${other.getClass.getSimpleName}"
+        )
+    }
+    val year = nums.headOption.getOrElse(0)
+    val month = nums.lift(1).getOrElse(1)
+    val day = nums.lift(2).getOrElse(1)
+    val hour = nums.lift(3).getOrElse(0)
+    val minute = nums.lift(4).getOrElse(0)
+    val second = nums.lift(5).getOrElse(0)
+    VDate.of(year, month, day, hour, minute, second)
+end VDate
+
+/** A Vyxal duration value wrapping a [[java.time.Duration]]. */
+final case class VDuration(dur: JDuration) extends VAny, Ordered[VDuration]:
+  def toDays: VNum = VNum(dur.toDays)
+  def toHours: VNum = VNum(dur.toHours)
+  def toMinutes: VNum = VNum(dur.toMinutes)
+  def toSeconds: VNum = VNum(dur.getSeconds)
+  def toMillis: VNum = VNum(dur.toMillis)
+
+  override def compare(that: VDuration): Int = dur.compareTo(that.dur)
+  override def toString: String = dur.toString
+
+object VDuration:
+  def ofDays(n: Long): VDuration = VDuration(JDuration.ofDays(n))
+
+  /** Create a duration from a fractional number of days. Supports decimals
+    * (e.g., 0.5 = 12 hours, 1.5 = 36 hours).
+    */
+  def ofDaysDecimal(n: Double): VDuration =
+    VDuration(JDuration.ofMillis((n * 86_400_000L).toLong))
+  def ofHours(n: Long): VDuration = VDuration(JDuration.ofHours(n))
+  def ofMinutes(n: Long): VDuration = VDuration(JDuration.ofMinutes(n))
+  def ofSeconds(n: Long): VDuration = VDuration(JDuration.ofSeconds(n))
+  def ofMillis(n: Long): VDuration = VDuration(JDuration.ofMillis(n))
+  def ofWeeks(n: Long): VDuration = VDuration(JDuration.ofDays(n * 7))
+  def parse(s: String): VDuration = VDuration(JDuration.parse(s))
+  val Zero: VDuration = VDuration(JDuration.ZERO)
+
+/** A Vyxal list. It simply wraps around another list and could represent a
+  * completely evaluated list, a finite lazy list that is in the process of
+  * being evaluated, or an infinite list.
+  *
+  * To construct a VList, use VList.apply or VList
+  * @param lst
+  *   The wrapped list actually holdings this VList's elements.
+  */
 final case class VList(lst: Seq[VAny]) extends VAny:
   override def toString(): String =
     lst.map(_.toString).mkString("[ ", " | ", " ]")
